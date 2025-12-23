@@ -2,7 +2,7 @@
   "name": "twitch-ponto-bot",
   "version": "1.0.0",
   "main": "index.js",
-   "scripts": {
+  "scripts": {
     "start": "node bot.js"
   },
   "keywords": [],
@@ -13,6 +13,7 @@
     "axios": "^1.9.0",
     "cors": "^2.8.5",
     "dayjs": "^1.11.13",
+    "dotenv": "^17.2.3",
     "express": "^5.1.0",
     "sqlite3": "^5.1.7",
     "tmi.js": "^1.8.5"

@@ -4,6 +4,19 @@ const axios = require('axios');
 const dayjs = require('dayjs');
 const db = require('./db'); // sem {}
 
+// Adição: logs de diagnóstico para facilitar debug de caminho e ambiente
+console.log('Iniciando bot.js');
+console.log('Arquivo atual:', __filename);
+console.log('Diretório atual:', process.cwd());
+
+// Captura de exceções não tratadas para facilitar diagnóstico
+process.on('uncaughtException', (err) => {
+  console.error('Exceção não tratada:', err && err.stack ? err.stack : err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('Promise rejeitada não tratada:', reason);
+});
+
 // Configurações do bot
 const CHANNEL_NAME = process.env.CHANNEL_NAME || 'lais_inc';
 const BOT_USERNAME = process.env.BOT_USERNAME || 'lais_bot';
