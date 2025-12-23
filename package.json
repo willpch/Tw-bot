@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "start:all:linux": "(cd backend && npm start &) && (cd bot && npm start &) && (cd frontend && npm run dev &)",
+    "start:all:win": "Start-Process npm -ArgumentList '--prefix ./bot start'; Start-Process npm -ArgumentList '--prefix ./backend start'; Start-Process npm -ArgumentList '--prefix ./frontend run dev'"
   },
   "keywords": [],
   "author": "",
