@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="245f90c1-25e9-45ad-a6f4-161645652536" name="VPS Twitch Bot">
+        <fileTransfer rootFolder="/opt/point-bot" accessType="SFTP" host="vps63387.publiccloud.com.br" port="22" sshConfigId="ae865dcd-6e37-4f6a-ace0-595ce250d4b6" sshConfig="root@vps63387.publiccloud.com.br:22 password">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" keepAliveTimeout="0" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>
