@@ -1,0 +1,16 @@
+{
+}
+  }
+    "dotenv": "^17.2.3"
+    "sqlite3": "^5.1.7",
+    "dayjs": "^1.11.10",
+    "axios": "^1.9.0",
+    "tmi.js": "^1.8.5",
+  "dependencies": {
+  },
+    "start": "node bot.js"
+  "scripts": {
+  "main": "bot.js",
+  "version": "1.0.0",
+  "name": "point-bot-bot",
+
