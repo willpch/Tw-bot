@@ -2,7 +2,7 @@ require('dotenv').config();
 const tmi = require('tmi.js');
 const axios = require('axios');
 const dayjs = require('dayjs');
-const db = require('./db'); // sem {}
+const pool = require('./db'); // agora usando pool do mysql2
 
 // Adição: logs de diagnóstico para facilitar debug de caminho e ambiente
 console.log('Iniciando bot.js');
@@ -18,12 +18,12 @@ process.on('unhandledRejection', (reason) => {
 });
 
 // Configurações do bot
-const CHANNEL_NAME = process.env.CHANNEL_NAME || 'lais_inc';
-const BOT_USERNAME = process.env.BOT_USERNAME || 'lais_bot';
-const OAUTH_TOKEN = process.env.OAUTH_TOKEN || 'oauth:q42o4rnqt5wpbtr8y9bzgxbrrchra4';
-const CLIENT_ID = process.env.CLIENT_ID || 'gp762nuuoqcoxypju8c569th9wz7q5';
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN || 'q42o4rnqt5wpbtr8y9bzgxbrrchra4';
-const BROADCASTER_ID = process.env.BROADCASTER_ID || '30820759';
+const CHANNEL_NAME = process.env.CHANNEL_NAME;
+const BOT_USERNAME = process.env.BOT_USERNAME;
+const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
+const BROADCASTER_ID = process.env.BROADCASTER_ID;
 
 const client = new tmi.Client({
     options: { debug: true },
@@ -99,31 +99,20 @@ const client = new tmi.Client({
       }
 
       const usuario = parts[1].replace('@', '').toLowerCase();
-
-      db.serialize(() => {
-        db.get(`
-      SELECT SUM(pontos) as totalMesAtual
-      FROM pontos
-      WHERE username = ?
-        AND data LIKE ?
-    `, [usuario, `${currentMonth}-%`], (err, rowAtual) => {
-
-          db.get(`
-        SELECT SUM(pontos) as totalMesPassado
-        FROM pontos
-        WHERE username = ?
-          AND data LIKE ?
-      `, [usuario, `${lastMonth}-%`], (err, rowPassado) => {
-
-            if (err) {
-              console.error('Erro ao buscar pontos:', err.message);
-              client.say(channel, `@${tags.username}, erro ao buscar pontos de @${usuario}.`);
-            } else {
-              client.say(channel, `@${tags.username}, o usuário @${usuario} tem ${rowAtual?.totalMesAtual || 0} pontos este mês e ${rowPassado?.totalMesPassado || 0} pontos no mês passado.`);
-            }
-          });
-        });
-      });
+      try {
+        const [rowsAtual] = await pool.promise().query(
+          `SELECT SUM(pontos) as totalMesAtual FROM pontos WHERE username = ? AND data LIKE ?`,
+          [usuario, `${currentMonth}-%`]
+        );
+        const [rowsPassado] = await pool.promise().query(
+          `SELECT SUM(pontos) as totalMesPassado FROM pontos WHERE username = ? AND data LIKE ?`,
+          [usuario, `${lastMonth}-%`]
+        );
+        client.say(channel, `@${tags.username}, o usuário @${usuario} tem ${(rowsAtual[0]?.totalMesAtual || 0)} pontos este mês e ${(rowsPassado[0]?.totalMesPassado || 0)} pontos no mês passado.`);
+      } catch (err) {
+        console.error('Erro ao buscar pontos:', err.message);
+        client.say(channel, `@${tags.username}, erro ao buscar pontos de @${usuario}.`);
+      }
     }
 
     if (message.toLowerCase().startsWith('!addpontos')) {
@@ -146,35 +135,48 @@ const client = new tmi.Client({
           client.say(channel, `@${tags.username}, quantidade inválida.`);
           return;
         }
-      
-        db.run(`INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`, [usuario, today, quantidade], (err) => {
-          if (err) {
-            console.error('Erro adicionando pontos:', err.message);
-            client.say(channel, `@${tags.username}, erro ao adicionar pontos.`);
-          } else {
-            client.say(channel, `@${tags.username}, adicionado ${quantidade} pontos para @${usuario}!`);
+        pool.query(
+          `INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`,
+          [usuario, today, quantidade],
+          (err) => {
+            if (err) {
+              console.error('Erro adicionando pontos:', err.message);
+              client.say(channel, `@${tags.username}, erro ao adicionar pontos.`);
+            } else {
+              client.say(channel, `@${tags.username}, adicionado ${quantidade} pontos para @${usuario}!`);
+            }
           }
-        });
+        );
     }
 
     if (message.toLowerCase() === '!batendoponto') {
-      db.get(`SELECT * FROM pontos WHERE username = ? AND data = ?`, [username, today], async (err, row) => {
-        if (row) {
-          client.say(channel, `@${username}, você já bateu o ponto hoje!`);
-        } else {
-          const online = await isStreamOnline();
-          if (!online) {
-            client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
-            return;
+      pool.query(
+        `SELECT * FROM pontos WHERE username = ? AND data = ?`,
+        [username, today],
+        async (err, results) => {
+          if (results && results.length > 0) {
+            client.say(channel, `@${username}, você já bateu o ponto hoje!`);
+          } else {
+            const online = await isStreamOnline();
+            if (!online) {
+              client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
+              return;
+            }
+            const isSub = await isUserSub(username);
+            const pontos = isSub ? 10 : 10;
+            pool.query(
+              `INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`,
+              [username, today, pontos],
+              (err) => {
+                if (err) {
+                  console.error('Erro ao bater ponto:', err.message);
+                }
+                client.say(channel, `@${username}, ponto batido! obrigada por aparecer! (Estou em teste!)`);
+              }
+            );
           }
-
-          const isSub = await isUserSub(username);
-          const pontos = isSub ? 10 : 10;
-
-          db.run(`INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`, [username, today, pontos]);
-          client.say(channel, `@${username}, ponto batido! obrigada por aparecer! (Estou em teste!)`);
         }
-      });
+      );
     }
 
     if (message.toLowerCase() === '!olá') {
@@ -182,66 +184,47 @@ const client = new tmi.Client({
     }
   
     if (message.toLowerCase() === '!meuspontos') {
-      db.serialize(() => {
-        db.get(`
-          SELECT SUM(pontos) as totalMesAtual
-          FROM pontos
-          WHERE username = ?
-            AND data LIKE ?
-        `, [username, `${currentMonth}-%`], (err, rowAtual) => {
-  
-          db.get(`
-            SELECT SUM(pontos) as totalMesPassado
-            FROM pontos
-            WHERE username = ?
-              AND data LIKE ?
-          `, [username, `${lastMonth}-%`], (err, rowPassado) => {
-  
-            db.all(`
-              SELECT username, SUM(pontos) as total
-              FROM pontos
-              WHERE data LIKE ?
-              GROUP BY username
-              ORDER BY total DESC
-            `, [`${currentMonth}-%`], (err, ranking) => {
-  
-              const posicao = ranking.findIndex(r => r.username === username) + 1;
-  
-              client.say(channel, `@${username}, este mês você tem ${rowAtual.totalMesAtual || 0} pontos, mês passado acumulou ${rowPassado.totalMesPassado || 0} pontos. Sua posição atual: ${posicao > 0 ? `#${posicao}` : 'fora do ranking'}.`);
-            });
-          });
-        });
-      });
+      try {
+        const [rowsAtual] = await pool.promise().query(
+          `SELECT SUM(pontos) as totalMesAtual FROM pontos WHERE username = ? AND data LIKE ?`,
+          [username, `${currentMonth}-%`]
+        );
+        const [rowsPassado] = await pool.promise().query(
+          `SELECT SUM(pontos) as totalMesPassado FROM pontos WHERE username = ? AND data LIKE ?`,
+          [username, `${lastMonth}-%`]
+        );
+        const [ranking] = await pool.promise().query(
+          `SELECT username, SUM(pontos) as total FROM pontos WHERE data LIKE ? GROUP BY username ORDER BY total DESC`,
+          [`${currentMonth}-%`]
+        );
+        const posicao = ranking.findIndex(r => r.username === username) + 1;
+        client.say(channel, `@${username}, este mês você tem ${(rowsAtual[0]?.totalMesAtual || 0)} pontos, mês passado acumulou ${(rowsPassado[0]?.totalMesPassado || 0)} pontos. Sua posição atual: ${posicao > 0 ? `#${posicao}` : 'fora do ranking'}.`);
+      } catch (err) {
+        console.error('Erro ao buscar pontos:', err.message);
+        client.say(channel, `@${username}, erro ao buscar seus pontos.`);
+      }
     }
   
     if (message.toLowerCase() === '!ranking') {
-      db.all(`
-        SELECT username, SUM(pontos) as total
-        FROM pontos
-        WHERE data LIKE ?
-        GROUP BY username
-        ORDER BY total DESC
-        LIMIT 5
-      `, [`${currentMonth}-%`], (err, rows) => {
-          if (rows.length === 0) {
-              client.say(channel, `Ainda não temos funcionários pontuando este mês.`);
+      pool.query(
+        `SELECT username, SUM(pontos) as total FROM pontos WHERE data LIKE ? GROUP BY username ORDER BY total DESC LIMIT 5`,
+        [`${currentMonth}-%`],
+        (err, rows) => {
+          if (!rows || rows.length === 0) {
+            client.say(channel, `Ainda não temos funcionários pontuando este mês.`);
           } else {
-
-              let msg = '🏆 Funcionários do Mês: -> \n\n';
-
-              rows.slice(0, 10).forEach((row, idx) => {
-                  let icon = "⭐";
-
-                  if (idx === 0) icon = "🥇";
-                  else if (idx === 1) icon = "🥈";
-                  else if (idx === 2) icon = "🥉";
-
-                  msg += ` | ${icon} #${idx+1} ${row.username} (${row.total} pts)`;
-              });
-
-              client.say(channel, msg);
+            let msg = '🏆 Funcionários do Mês: -> \n\n';
+            rows.slice(0, 10).forEach((row, idx) => {
+              let icon = "⭐";
+              if (idx === 0) icon = "🥇";
+              else if (idx === 1) icon = "🥈";
+              else if (idx === 2) icon = "🥉";
+              msg += ` | ${icon} #${idx+1} ${row.username} (${row.total} pts)`;
+            });
+            client.say(channel, msg);
           }
-      });
+        }
+      );
     }
   
     if (message.toLowerCase() === '!regrasponto') {

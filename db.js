@@ -1,30 +1,15 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
-const fs = require('fs');
+const mysql = require('mysql2');
 require('dotenv').config();
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'database', 'pontos.db');
-// Resolve caminho absoluto
-const resolvedDbPath = path.isAbsolute(dbPath) ? dbPath : path.resolve(__dirname, dbPath);
-// Garante que o diretório existe
-const dbDir = path.dirname(resolvedDbPath);
-if (!fs.existsSync(dbDir)) {
-  fs.mkdirSync(dbDir, { recursive: true });
-  console.log('Diretório do banco criado em:', dbDir);
-}
-console.log('Usando banco de dados em:', resolvedDbPath);
-
-const db = new sqlite3.Database(resolvedDbPath);
-
-db.serialize(() => {
-  db.run(`
-    CREATE TABLE IF NOT EXISTS pontos (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT,
-      data TEXT,
-      pontos INTEGER
-    )
-  `);
+// Configurações do banco MySQL vindas do .env
+const pool = mysql.createPool({
+  host: process.env.DB_HOST,
+  user: process.env.DB_USER,
+  password: process.env.DB_PASSWORD,
+  database: process.env.DB_DATABASE,
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
 });
 
-module.exports = db;
+module.exports = pool;
