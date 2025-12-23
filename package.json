@@ -1,23 +1,14 @@
 {
-  "name": "twitch-ponto-bot",
+  "name": "point-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "bot.js",
   "scripts": {
-    "start": "node bot.js",
-    "start:all:linux": "(cd backend && npm start &) && (cd bot && npm start &) && (cd frontend && npm run dev &)",
-    "start:all:win": "Start-Process npm -ArgumentList '--prefix ./bot start'; Start-Process npm -ArgumentList '--prefix ./backend start'; Start-Process npm -ArgumentList '--prefix ./frontend run dev'"
+    "start": "node bot.js"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "description": "",
   "dependencies": {
+    "tmi.js": "^1.8.5",
     "axios": "^1.9.0",
-    "cors": "^2.8.5",
-    "dayjs": "^1.11.13",
-    "dotenv": "^17.2.3",
-    "express": "^5.1.0",
-    "sqlite3": "^5.1.7",
-    "tmi.js": "^1.8.5"
+    "dayjs": "^1.11.10",
+    "dotenv": "^17.2.3"
   }
 }
