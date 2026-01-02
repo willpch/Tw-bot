@@ -160,40 +160,44 @@ client.on('message', async (channel, tags, message, self) => {
         message.toLowerCase() === '!batendoponto' ||
         message.toLowerCase() === '!ponto'
     ) {
-        pool.query(
-            `SELECT *
-             FROM pontos
-             WHERE username = ?
-               AND data = ?`,
-            [username, today],
-            async (err, results) => {
-                if (results && results.length > 0) {
-                    client.say(channel, `@${username}, você já bateu o ponto hoje!`);
-                } else {
-                    const online = await isStreamOnline();
-                    if (!online) {
-                        client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
-                        return;
-                    }
-                    const isSub = await isUserSub(username);
-                    const pontos = isSub ? 10 : 10;
-                    pool.query(
-                        `INSERT INTO pontos (username, data, pontos)
-                         VALUES (?, ?, ?)`,
-                        [username, today, pontos],
-                        (err) => {
-                            if (err) {
-                                console.error('Erro ao bater ponto:', err.message);
-                            }
-                            client.say(channel, `@${username}, ponto batido! obrigada por aparecer! (Estou em teste!)`);
-                        }
-                    );
-                }
+        try {
+            const [jaBateu] = await pool.promise().query(
+                `SELECT 1 FROM pontos WHERE username = ? AND data = ? LIMIT 1`,
+                [username, today]
+            );
+            if (jaBateu.length > 0) {
+                client.say(channel, `@${username}, você já bateu o ponto hoje!`);
+                return;
             }
-        );
+
+            const online = await isStreamOnline();
+            if (!online) {
+                client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
+                return;
+            }
+
+            const [contagemDia] = await pool.promise().query(
+                `SELECT COUNT(*) AS total FROM pontos WHERE data = ?`,
+                [today]
+            );
+            const totalHoje = contagemDia[0]?.total || 0;
+            const pontos = Math.max(0, 100 - totalHoje);
+
+            await pool.promise().query(
+                `INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`,
+                [username, today, pontos]
+            );
+            client.say(channel, `@${username}, ponto batido! Você ganhou ${pontos} pontos!`);
+        } catch (err) {
+            console.error('Erro ao bater ponto:', err.message);
+            client.say(channel, `@${username}, não consegui registrar seu ponto agora. Tente novamente em instantes.`);
+        }
     }
 
-    if (message.toLowerCase() === '!olá') {
+    if (
+        message.toLowerCase() === '!ola' ||
+        message.toLowerCase() === '!olá'
+    ) {
         client.say(channel, `@${username}, Olá! Como você está? Atualmente estou em teste, posso errar, então tenha paciência comigo!`);
     }
 
@@ -233,10 +237,10 @@ client.on('message', async (channel, tags, message, self) => {
         message.toLowerCase() === '!ranking' ||
         message.toLowerCase() === '!rank'
     ) {
-        client.say(channel, "Para ver os funcionários do mês: https://lais.nootsoft.com.br/ranking");
+        client.say(channel, "Para ver tabela de pontos e funcionários do mês: https://lais.nootsoft.com.br/ranking");
     }
 
     if (message.toLowerCase() === '!regrasponto') {
-        client.say(channel, `📋 Regras: Bater ponto uma vez por dia enquanto a live estiver online. Ganhe pontos dependendo do horário do resgate!`);
+        client.say(channel, `📋 Regras: Bater ponto uma vez por dia enquanto a live estiver online. Você ganha 100 pontos (ou menos) baseado em quem bateo pontos primeiro, descrescendo! Use !batendoponto ou !ponto para bater o ponto diário. Comando !meuspontos para ver seus pontos do mês atual e anterior. Comando !ranking para ver o ranking completo! 📋`);
     }
 });
