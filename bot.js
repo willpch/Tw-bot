@@ -3,6 +3,7 @@ const tmi = require('tmi.js');
 const axios = require('axios');
 const dayjs = require('dayjs');
 const pool = require('./db'); // agora usando pool do mysql2
+const { logPontoError } = require('./logger');
 
 // Adição: logs de diagnóstico para facilitar debug de caminho e ambiente
 console.log('Iniciando bot.js');
@@ -36,15 +37,74 @@ const client = new tmi.Client({
 
 client.connect();
 
+// Cache do status da stream para evitar múltiplas chamadas simultâneas à API da Twitch
+let streamStatusCache = {
+    online: false,
+    timestamp: 0
+};
+const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutos
+let streamCheckPromise = null; // Evita chamadas paralelas simultâneas
+
 async function isStreamOnline() {
-    const url = `https://api.twitch.tv/helix/streams?user_login=${CHANNEL_NAME}`;
-    const res = await axios.get(url, {
-        headers: {
-            'Client-ID': CLIENT_ID,
-            'Authorization': `Bearer ${ACCESS_TOKEN}`
+    const agora = Date.now();
+
+    // Retorna do cache se ainda válido
+    if (agora - streamStatusCache.timestamp < CACHE_TTL_MS) {
+        console.log(`[isStreamOnline] Usando cache: ${streamStatusCache.online ? 'ONLINE' : 'OFFLINE'} (${Math.round((agora - streamStatusCache.timestamp) / 1000)}s atrás)`);
+        return streamStatusCache.online;
+    }
+
+    // Se já há uma chamada em andamento, aguarda ela ao invés de criar outra
+    if (streamCheckPromise) {
+        console.log('[isStreamOnline] Aguardando chamada em andamento...');
+        return streamCheckPromise;
+    }
+
+    streamCheckPromise = (async () => {
+        const url = `https://api.twitch.tv/helix/streams?user_login=${CHANNEL_NAME}`;
+        const MAX_TENTATIVAS = 3;
+        const TIMEOUT_MS = 15000;
+
+        for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+            try {
+                console.log(`[isStreamOnline] Consultando API Twitch (tentativa ${tentativa}/${MAX_TENTATIVAS})...`);
+                const res = await axios.get(url, {
+                    headers: {
+                        'Client-ID': CLIENT_ID,
+                        'Authorization': `Bearer ${ACCESS_TOKEN}`
+                    },
+                    timeout: TIMEOUT_MS
+                });
+                const online = res.data.data.length > 0;
+
+                // Atualiza cache
+                streamStatusCache = { online, timestamp: Date.now() };
+                console.log(`[isStreamOnline] Stream está: ${online ? 'ONLINE' : 'OFFLINE'} — cache atualizado`);
+                return online;
+            } catch (error) {
+                const isUltimaTentativa = tentativa === MAX_TENTATIVAS;
+                console.warn(`[isStreamOnline] Tentativa ${tentativa}/${MAX_TENTATIVAS} falhou: ${error.message}`);
+
+                if (!isUltimaTentativa) {
+                    // Backoff exponencial: 2s, 4s
+                    await new Promise(r => setTimeout(r, 2000 * tentativa));
+                }
+            }
         }
+
+        // Fallback: usa cache expirado se existir, para não travar o !ponto
+        if (streamStatusCache.timestamp > 0) {
+            console.warn(`[isStreamOnline] API falhou após ${MAX_TENTATIVAS} tentativas. Usando cache expirado: ${streamStatusCache.online ? 'ONLINE' : 'OFFLINE'}`);
+            return streamStatusCache.online;
+        }
+
+        // Sem cache nenhum, retorna false (offline) para não liberar ponto indevido
+        return false;
+    })().finally(() => {
+        streamCheckPromise = null; // Libera para próxima chamada após concluir
     });
-    return res.data.data.length > 0;
+
+    return streamCheckPromise;
 }
 
 async function isUserSub(username) {
@@ -135,7 +195,7 @@ client.on('message', async (channel, tags, message, self) => {
 
         const usuario = parts[1].replace('@', '').toLowerCase();
         const quantidade = parseInt(parts[2], 10);
-        const today = dayjs().format('YYYY-MM-DD');
+        const dataHoraAdd = dayjs().format('YYYY-MM-DD HH:mm:ss');
 
         if (isNaN(quantidade) || quantidade <= 0) {
             client.say(channel, `@${tags.username}, quantidade inválida.`);
@@ -144,7 +204,7 @@ client.on('message', async (channel, tags, message, self) => {
         pool.query(
             `INSERT INTO pontos (username, data, pontos)
              VALUES (?, ?, ?)`,
-            [usuario, today, quantidade],
+            [usuario, dataHoraAdd, quantidade],
             (err) => {
                 if (err) {
                     console.error('Erro adicionando pontos:', err.message);
@@ -160,9 +220,11 @@ client.on('message', async (channel, tags, message, self) => {
         message.toLowerCase() === '!batendoponto' ||
         message.toLowerCase() === '!ponto'
     ) {
+        let etapa = 'início';
         try {
+            etapa = 'verificar se já bateu ponto hoje (SELECT)';
             const [jaBateu] = await pool.promise().query(
-                `SELECT 1 FROM pontos WHERE username = ? AND data = ? LIMIT 1`,
+                `SELECT 1 FROM pontos WHERE username = ? AND DATE(data) = ? LIMIT 1`,
                 [username, today]
             );
             if (jaBateu.length > 0) {
@@ -170,26 +232,30 @@ client.on('message', async (channel, tags, message, self) => {
                 return;
             }
 
+            etapa = 'verificar se a stream está online (Twitch API)';
             const online = await isStreamOnline();
             if (!online) {
                 client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
                 return;
             }
 
+            etapa = 'contar quantos já bateram ponto hoje (COUNT)';
             const [contagemDia] = await pool.promise().query(
-                `SELECT COUNT(*) AS total FROM pontos WHERE data = ?`,
+                `SELECT COUNT(*) AS total FROM pontos WHERE DATE(data) = ?`,
                 [today]
             );
             const totalHoje = contagemDia[0]?.total || 0;
             const pontos = Math.max(0, 100 - totalHoje);
 
+            etapa = 'inserir registro de ponto no banco (INSERT)';
+            const dataHora = dayjs().format('YYYY-MM-DD HH:mm:ss');
             await pool.promise().query(
                 `INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`,
-                [username, today, pontos]
+                [username, dataHora, pontos]
             );
             client.say(channel, `@${username}, ponto batido! Você ganhou ${pontos} pontos!`);
         } catch (err) {
-            console.error('Erro ao bater ponto:', err.message);
+            logPontoError(username, message, err, etapa);
             client.say(channel, `@${username}, não consegui registrar seu ponto agora. Tente novamente em instantes.`);
         }
     }
@@ -206,7 +272,7 @@ client.on('message', async (channel, tags, message, self) => {
             const [rowsAtual] = await pool.promise().query(
                 `SELECT SUM(pontos) as totalMesAtual
                  FROM pontos
-                 WHERE username = ?''
+                 WHERE username = ?
                    AND data LIKE ?`,
                 [username, `${currentMonth}-%`]
             );
@@ -237,7 +303,7 @@ client.on('message', async (channel, tags, message, self) => {
         message.toLowerCase() === '!ranking' ||
         message.toLowerCase() === '!rank'
     ) {
-        client.say(channel, "Para ver tabela de pontos e funcionários do mês: https://lais.nootsoft.com.br/ranking");
+        client.say(channel, "Para ver tabela de pontos e funcionários do mês: http://vps9769.integrator.host/Ranking");
     }
 
     if (message.toLowerCase() === '!regrasponto') {
