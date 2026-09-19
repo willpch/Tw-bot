@@ -303,7 +303,7 @@ client.on('message', async (channel, tags, message, self) => {
         message.toLowerCase() === '!ranking' ||
         message.toLowerCase() === '!rank'
     ) {
-        client.say(channel, "Para ver tabela de pontos e funcionários do mês: http://vps9769.integrator.host/Ranking");
+        client.say(channel, "Para ver tabela de pontos e funcionários do mês: https://laisinc.com.br/ranking");
     }
 
     if (message.toLowerCase() === '!regrasponto') {
