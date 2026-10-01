@@ -51,8 +51,8 @@ async function baterPonto(username) {
     const dia = hoje();
 
     const [insercao] = await pool.query(
-        `INSERT INTO pontos (username, \`data\`, pontos, criado_por, criado_em)
-         VALUES (?, ?, 0, 'bot', NOW())
+        `INSERT INTO pontos (username, \`data\`, pontos, criado_por)
+         VALUES (?, ?, 0, 'bot')
          ON DUPLICATE KEY UPDATE id = id`,
         [username, agora()]
     );
@@ -85,8 +85,8 @@ async function baterPonto(username) {
  */
 async function adicionarPontos(username, quantidade, autor) {
     const [resultado] = await pool.query(
-        `INSERT INTO pontos (username, \`data\`, pontos, criado_por, criado_em)
-         VALUES (?, ?, ?, ?, NOW())
+        `INSERT INTO pontos (username, \`data\`, pontos, criado_por)
+         VALUES (?, ?, ?, ?)
          ON DUPLICATE KEY UPDATE
              pontos = pontos + VALUES(pontos),
              atualizado_por = VALUES(criado_por),
