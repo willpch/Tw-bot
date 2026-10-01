@@ -50,16 +50,24 @@ function limitesDoMes(ano, mes) {
 async function baterPonto(username) {
     const dia = hoje();
 
-    const [insercao] = await pool.query(
-        `INSERT INTO pontos (username, \`data\`, pontos, criado_por)
-         VALUES (?, ?, 0, 'bot')
-         ON DUPLICATE KEY UPDATE id = id`,
-        [username, agora()]
-    );
-
-    // affectedRows 0 = a chave única barrou: já existe registro dessa pessoa hoje.
-    if (insercao.affectedRows === 0) {
-        return { status: 'ja_bateu' };
+    // INSERT simples: se a chave única (username, dia) recusar, essa pessoa já
+    // tem registro hoje. A violação da chave é o sinal — não dá para usar
+    // "ON DUPLICATE KEY UPDATE id = id" e olhar affectedRows, porque o mysql2
+    // liga CLIENT_FOUND_ROWS por padrão e aí o duplicado também conta 1 linha
+    // afetada (o ensaio da migration pegou isso: o !ponto repetido respondia
+    // "1º do dia, 100 pontos").
+    let insercao;
+    try {
+        [insercao] = await pool.query(
+            `INSERT INTO pontos (username, \`data\`, pontos, criado_por)
+             VALUES (?, ?, 0, 'bot')`,
+            [username, agora()]
+        );
+    } catch (erro) {
+        if (erro && erro.code === 'ER_DUP_ENTRY') {
+            return { status: 'ja_bateu' };
+        }
+        throw erro;
     }
 
     const id = insercao.insertId;
