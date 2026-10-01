@@ -1,0 +1,4 @@
+# Scripts que rodam dentro de containers Linux: sempre LF, mesmo em checkout
+# no Windows (com CRLF o shell do container nao consegue executa-los).
+*.sh text eol=lf
+Dockerfile text eol=lf
