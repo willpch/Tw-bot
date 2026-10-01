@@ -1,312 +1,148 @@
-require('dotenv').config();
+/**
+ * Bot de pontos da Twitch.
+ *
+ * Toda a lógica vive em src/: config, banco, API da Twitch, serviços, comandos
+ * e watchers. Este arquivo só monta as peças.
+ */
 const tmi = require('tmi.js');
-const axios = require('axios');
-const dayjs = require('dayjs');
-const pool = require('./db'); // agora usando pool do mysql2
-const { logPontoError } = require('./logger');
 
-// Adição: logs de diagnóstico para facilitar debug de caminho e ambiente
-console.log('Iniciando bot.js');
-console.log('Arquivo atual:', __filename);
-console.log('Diretório atual:', process.cwd());
+const config = require('./src/config');
+const log = require('./src/logger');
+const pool = require('./src/db');
+const chat = require('./src/twitch/chat');
+const schema = require('./src/services/schema');
+const stream = require('./src/twitch/stream');
+const anuncios = require('./src/watchers/anuncios');
+const { despachar } = require('./src/commands/registry');
 
-// Captura de exceções não tratadas para facilitar diagnóstico
-process.on('uncaughtException', (err) => {
-    console.error('Exceção não tratada:', err && err.stack ? err.stack : err);
-});
-process.on('unhandledRejection', (reason) => {
-    console.error('Promise rejeitada não tratada:', reason);
-});
+// Registra todos os comandos no registry.
+require('./src/commands/list');
 
-// Configurações do bot
-const CHANNEL_NAME = process.env.CHANNEL_NAME;
-const BOT_USERNAME = process.env.BOT_USERNAME;
-const OAUTH_TOKEN = process.env.OAUTH_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const ACCESS_TOKEN = process.env.ACCESS_TOKEN;
-const BROADCASTER_ID = process.env.BROADCASTER_ID;
+log.info(`Iniciando bot no canal #${config.twitch.canal} (fuso ${config.timezone})`);
 
 const client = new tmi.Client({
-    options: {debug: true},
-    identity: {
-        username: BOT_USERNAME,
-        password: OAUTH_TOKEN
+    options: {
+        // Era debug: true fixo, o que jogava todo o chat no stdout em produção.
+        debug: config.twitch.debug,
     },
-    channels: [CHANNEL_NAME]
+    connection: {
+        secure: true,
+        // O padrão do tmi.js é NÃO reconectar. Sem isto, qualquer queda de rede
+        // ou restart do IRC da Twitch deixava o bot vivo no processo mas surdo
+        // no chat, sem erro nenhum, até alguém reiniciar na mão.
+        reconnect: true,
+        maxReconnectAttempts: Infinity,
+        maxReconnectInterval: 30000,
+    },
+    identity: {
+        username: config.twitch.botUsername,
+        password: config.twitch.oauthToken,
+    },
+    channels: [config.twitch.canal],
 });
 
-client.connect();
+// ---------------------------------------------------------------------------
+// Eventos de conexão
+// ---------------------------------------------------------------------------
+client.on('connected', (endereco, porta) => {
+    log.info(`Conectado ao chat (${endereco}:${porta}).`);
+});
 
-// Cache do status da stream para evitar múltiplas chamadas simultâneas à API da Twitch
-let streamStatusCache = {
-    online: false,
-    timestamp: 0
-};
-const CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutos
-let streamCheckPromise = null; // Evita chamadas paralelas simultâneas
+client.on('disconnected', (motivo) => {
+    log.aviso(`Desconectado do chat: ${motivo}. Tentando reconectar...`);
+});
 
-async function isStreamOnline() {
-    const agora = Date.now();
+client.on('reconnect', () => {
+    log.info('Reconectando ao chat...');
+});
 
-    // Retorna do cache se ainda válido
-    if (agora - streamStatusCache.timestamp < CACHE_TTL_MS) {
-        console.log(`[isStreamOnline] Usando cache: ${streamStatusCache.online ? 'ONLINE' : 'OFFLINE'} (${Math.round((agora - streamStatusCache.timestamp) / 1000)}s atrás)`);
-        return streamStatusCache.online;
+client.on('notice', (canal, id, mensagem) => {
+    // Avisa de forma visível quando o token do chat é recusado.
+    if (id === 'msg_login_unsuccessful' || /login authentication failed/i.test(mensagem)) {
+        log.erro('A Twitch recusou o OAUTH_TOKEN do chat. Gere um novo token para o bot.');
     }
+});
 
-    // Se já há uma chamada em andamento, aguarda ela ao invés de criar outra
-    if (streamCheckPromise) {
-        console.log('[isStreamOnline] Aguardando chamada em andamento...');
-        return streamCheckPromise;
-    }
+// ---------------------------------------------------------------------------
+// Mensagens do chat
+// ---------------------------------------------------------------------------
+client.on('message', async (canal, tags, mensagem, ehDoProprioBot) => {
+    if (ehDoProprioBot) return;
 
-    streamCheckPromise = (async () => {
-        const url = `https://api.twitch.tv/helix/streams?user_login=${CHANNEL_NAME}`;
-        const MAX_TENTATIVAS = 3;
-        const TIMEOUT_MS = 15000;
+    await despachar({ client, canal, tags, mensagem });
+});
 
-        for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
-            try {
-                console.log(`[isStreamOnline] Consultando API Twitch (tentativa ${tentativa}/${MAX_TENTATIVAS})...`);
-                const res = await axios.get(url, {
-                    headers: {
-                        'Client-ID': CLIENT_ID,
-                        'Authorization': `Bearer ${ACCESS_TOKEN}`
-                    },
-                    timeout: TIMEOUT_MS
-                });
-                const online = res.data.data.length > 0;
-
-                // Atualiza cache
-                streamStatusCache = { online, timestamp: Date.now() };
-                console.log(`[isStreamOnline] Stream está: ${online ? 'ONLINE' : 'OFFLINE'} — cache atualizado`);
-                return online;
-            } catch (error) {
-                const isUltimaTentativa = tentativa === MAX_TENTATIVAS;
-                console.warn(`[isStreamOnline] Tentativa ${tentativa}/${MAX_TENTATIVAS} falhou: ${error.message}`);
-
-                if (!isUltimaTentativa) {
-                    // Backoff exponencial: 2s, 4s
-                    await new Promise(r => setTimeout(r, 2000 * tentativa));
-                }
-            }
-        }
-
-        // Fallback: usa cache expirado se existir, para não travar o !ponto
-        if (streamStatusCache.timestamp > 0) {
-            console.warn(`[isStreamOnline] API falhou após ${MAX_TENTATIVAS} tentativas. Usando cache expirado: ${streamStatusCache.online ? 'ONLINE' : 'OFFLINE'}`);
-            return streamStatusCache.online;
-        }
-
-        // Sem cache nenhum, retorna false (offline) para não liberar ponto indevido
-        return false;
-    })().finally(() => {
-        streamCheckPromise = null; // Libera para próxima chamada após concluir
-    });
-
-    return streamCheckPromise;
-}
-
-async function isUserSub(username) {
+// ---------------------------------------------------------------------------
+// Inicialização
+// ---------------------------------------------------------------------------
+async function iniciar() {
+    // Falha cedo e com mensagem clara se o banco estiver inacessível, em vez de
+    // descobrir isso no primeiro !ponto.
     try {
-        const userUrl = `https://api.twitch.tv/helix/users?login=${username}`;
-        const userRes = await axios.get(userUrl, {
-            headers: {
-                'Client-ID': CLIENT_ID,
-                'Authorization': `Bearer ${ACCESS_TOKEN}`
-            }
-        });
-
-        const userId = userRes.data.data[0]?.id;
-        if (!userId) return false;
-
-        const subUrl = `https://api.twitch.tv/helix/subscriptions?broadcaster_id=${BROADCASTER_ID}&user_id=${userId}`;
-        const subRes = await axios.get(subUrl, {
-            headers: {
-                'Client-ID': CLIENT_ID,
-                'Authorization': `Bearer ${ACCESS_TOKEN}`
-            }
-        });
-
-        return subRes.data.data.length > 0;
-    } catch (error) {
-        console.error('Erro verificando sub:', error.message);
-        return false;
+        const conexao = await pool.getConnection();
+        await conexao.ping();
+        conexao.release();
+        log.info('Conexão com o banco OK.');
+    } catch (erro) {
+        log.erro('Não foi possível conectar ao banco:', erro.message);
+        process.exit(1);
     }
+
+    // Recusa subir com o schema antigo: a proteção contra ponto duplicado
+    // depende da chave única no banco.
+    await schema.exigir();
+
+    // Toda mensagem enviada ao chat passa por esta fila, que respeita o rate
+    // limit da Twitch (~20 mensagens / 30s).
+    chat.configurar(client);
+
+    await client.connect();
+
+    // Aguarda a primeira leitura do estado da live antes de liberar o !ponto.
+    await stream.iniciar();
+
+    anuncios.iniciar();
 }
 
-// ---------------------
-// Eventos de mensagem
-// ---------------------
-client.on('message', async (channel, tags, message, self) => {
-    if (self) return;
+// ---------------------------------------------------------------------------
+// Encerramento e falhas
+// ---------------------------------------------------------------------------
+let encerrando = false;
 
-    const username = tags.username;
-    const today = dayjs().format('YYYY-MM-DD');
-    const currentMonth = dayjs().format('YYYY-MM');
-    const lastMonth = dayjs().subtract(1, 'month').format('YYYY-MM');
+async function encerrar(sinal) {
+    if (encerrando) return;
+    encerrando = true;
 
-    if (message.toLowerCase().startsWith('!pontos ')) {
-        if (tags.username !== CHANNEL_NAME) {
-            client.say(channel, `@${tags.username}, você não tem permissão para usar este comando.`);
-            return;
-        }
+    log.info(`Recebido ${sinal}: encerrando...`);
+    anuncios.parar();
+    stream.parar();
 
-        const parts = message.trim().split(' ');
-        if (parts.length < 2) {
-            client.say(channel, `@${tags.username}, use: !pontos nomedousuario`);
-            return;
-        }
-
-        const usuario = parts[1].replace('@', '').toLowerCase();
-        try {
-            const [rowsAtual] = await pool.promise().query(
-                `SELECT SUM(pontos) as totalMesAtual
-                 FROM pontos
-                 WHERE username = ?
-                   AND data LIKE ?`,
-                [usuario, `${currentMonth}-%`]
-            );
-            const [rowsPassado] = await pool.promise().query(
-                `SELECT SUM(pontos) as totalMesPassado
-                 FROM pontos
-                 WHERE username = ?
-                   AND data LIKE ?`,
-                [usuario, `${lastMonth}-%`]
-            );
-            client.say(channel, `@${tags.username}, o usuário @${usuario} tem ${(rowsAtual[0]?.totalMesAtual || 0)} pontos este mês e ${(rowsPassado[0]?.totalMesPassado || 0)} pontos no mês passado.`);
-        } catch (err) {
-            console.error('Erro ao buscar pontos:', err.message);
-            client.say(channel, `@${tags.username}, erro ao buscar pontos de @${usuario}.`);
-        }
+    try {
+        await client.disconnect();
+    } catch (e) {
+        // Já pode estar desconectado.
+    }
+    try {
+        await pool.end();
+    } catch (e) {
+        // Pool já encerrado.
     }
 
-    if (message.toLowerCase().startsWith('!addpontos')) {
-        if (tags.username !== CHANNEL_NAME) {
-            client.say(channel, `@${tags.username}, você não tem permissão para usar este comando.`);
-            return;
-        }
+    process.exit(0);
+}
 
-        const parts = message.trim().split(' ');
-        if (parts.length < 3) {
-            client.say(channel, `@${tags.username}, use: !addpontos usuario quantidade`);
-            return;
-        }
+process.on('SIGTERM', () => encerrar('SIGTERM'));
+process.on('SIGINT', () => encerrar('SIGINT'));
 
-        const usuario = parts[1].replace('@', '').toLowerCase();
-        const quantidade = parseInt(parts[2], 10);
-        const dataHoraAdd = dayjs().format('YYYY-MM-DD HH:mm:ss');
+process.on('uncaughtException', (erro) => {
+    log.erro('Exceção não tratada:', erro && erro.stack ? erro.stack : erro);
+});
 
-        if (isNaN(quantidade) || quantidade <= 0) {
-            client.say(channel, `@${tags.username}, quantidade inválida.`);
-            return;
-        }
-        pool.query(
-            `INSERT INTO pontos (username, data, pontos)
-             VALUES (?, ?, ?)`,
-            [usuario, dataHoraAdd, quantidade],
-            (err) => {
-                if (err) {
-                    console.error('Erro adicionando pontos:', err.message);
-                    client.say(channel, `@${tags.username}, erro ao adicionar pontos.`);
-                } else {
-                    client.say(channel, `@${tags.username}, adicionado ${quantidade} pontos para @${usuario}!`);
-                }
-            }
-        );
-    }
+process.on('unhandledRejection', (motivo) => {
+    log.erro('Promise rejeitada não tratada:', motivo);
+});
 
-    if (
-        message.toLowerCase() === '!batendoponto' ||
-        message.toLowerCase() === '!ponto'
-    ) {
-        let etapa = 'início';
-        try {
-            etapa = 'verificar se já bateu ponto hoje (SELECT)';
-            const [jaBateu] = await pool.promise().query(
-                `SELECT 1 FROM pontos WHERE username = ? AND DATE(data) = ? LIMIT 1`,
-                [username, today]
-            );
-            if (jaBateu.length > 0) {
-                client.say(channel, `@${username}, você já bateu o ponto hoje!`);
-                return;
-            }
-
-            etapa = 'verificar se a stream está online (Twitch API)';
-            const online = await isStreamOnline();
-            if (!online) {
-                client.say(channel, `@${username}, o canal precisa estar AO VIVO para bater o ponto!`);
-                return;
-            }
-
-            etapa = 'contar quantos já bateram ponto hoje (COUNT)';
-            const [contagemDia] = await pool.promise().query(
-                `SELECT COUNT(*) AS total FROM pontos WHERE DATE(data) = ?`,
-                [today]
-            );
-            const totalHoje = contagemDia[0]?.total || 0;
-            const pontos = Math.max(0, 100 - totalHoje);
-
-            etapa = 'inserir registro de ponto no banco (INSERT)';
-            const dataHora = dayjs().format('YYYY-MM-DD HH:mm:ss');
-            await pool.promise().query(
-                `INSERT INTO pontos (username, data, pontos) VALUES (?, ?, ?)`,
-                [username, dataHora, pontos]
-            );
-            client.say(channel, `@${username}, ponto batido! Você ganhou ${pontos} pontos!`);
-        } catch (err) {
-            logPontoError(username, message, err, etapa);
-            client.say(channel, `@${username}, não consegui registrar seu ponto agora. Tente novamente em instantes.`);
-        }
-    }
-
-    if (
-        message.toLowerCase() === '!ola' ||
-        message.toLowerCase() === '!olá'
-    ) {
-        client.say(channel, `@${username}, Olá! Como você está? Atualmente estou em teste, posso errar, então tenha paciência comigo!`);
-    }
-
-    if (message.toLowerCase() === '!meuspontos') {
-        try {
-            const [rowsAtual] = await pool.promise().query(
-                `SELECT SUM(pontos) as totalMesAtual
-                 FROM pontos
-                 WHERE username = ?
-                   AND data LIKE ?`,
-                [username, `${currentMonth}-%`]
-            );
-            const [rowsPassado] = await pool.promise().query(
-                `SELECT SUM(pontos) as totalMesPassado
-                 FROM pontos
-                 WHERE username = ?
-                   AND data LIKE ?`,
-                [username, `${lastMonth}-%`]
-            );
-            const [ranking] = await pool.promise().query(
-                `SELECT username, SUM(pontos) as total
-                 FROM pontos
-                 WHERE data LIKE ?
-                 GROUP BY username
-                 ORDER BY total DESC`,
-                [`${currentMonth}-%`]
-            );
-            const posicao = ranking.findIndex(r => r.username === username) + 1;
-            client.say(channel, `@${username}, este mês você tem ${(rowsAtual[0]?.totalMesAtual || 0)} pontos, mês passado acumulou ${(rowsPassado[0]?.totalMesPassado || 0)} pontos. Sua posição atual: ${posicao > 0 ? `#${posicao}` : 'fora do ranking'}.`);
-        } catch (err) {
-            console.error('Erro ao buscar pontos:', err.message);
-            client.say(channel, `@${username}, erro ao buscar seus pontos.`);
-        }
-    }
-
-    if (
-        message.toLowerCase() === '!ranking' ||
-        message.toLowerCase() === '!rank'
-    ) {
-        client.say(channel, "Para ver tabela de pontos e funcionários do mês: https://laisinc.com.br/ranking");
-    }
-
-    if (message.toLowerCase() === '!regrasponto') {
-        client.say(channel, `📋 Regras: Bater ponto uma vez por dia enquanto a live estiver online. Você ganha 100 pontos (ou menos) baseado em quem bateo pontos primeiro, descrescendo! Use !batendoponto ou !ponto para bater o ponto diário. Comando !meuspontos para ver seus pontos do mês atual e anterior. Comando !ranking para ver o ranking completo! 📋`);
-    }
+iniciar().catch((erro) => {
+    log.erro('Falha na inicialização:', erro && erro.stack ? erro.stack : erro);
+    process.exit(1);
 });
